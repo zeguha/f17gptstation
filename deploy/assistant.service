@@ -1,0 +1,24 @@
+[Unit]
+Description=Custom Voice Assistant (cloud orchestrated)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/opt/gpt-station
+ExecStart=/usr/bin/python3 -m assistant.main_cloud_orchestrated
+Restart=always
+RestartSec=1
+
+TimeoutStopSec=5
+
+# EnvironmentFile is the recommended place for API keys and tuning.
+EnvironmentFile=/etc/assistant.env
+
+# Hardening (keep modest for audio access)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
