@@ -51,22 +51,33 @@ def render_weather_answer_ru(
     *,
     place: str | None,
     mode: str,
+    when_label: str | None = None,
 ) -> str:
+    """Render a RU weather answer.
+
+    `when_label` is an optional human phrase like "завтра вечером" or "в пятницу"
+    describing the forecast moment. When omitted, the answer reads as "right now".
+    """
+
     t = _round_temp_c(w.temperature_c)
     feels = _round_temp_c(w.apparent_c)
     where = f"в {place}" if place else ""
     desc = _weather_code_ru(w.weather_code)
 
+    now_word = when_label[0].upper() + when_label[1:] if when_label else "Сейчас"
+    time_phrase = when_label if when_label else "в ближайший час"
+
     if mode == "weather_umbrella":
         p = w.precipitation_prob_pct
         raining = (w.precipitation_mm or 0.0) > 0.0
         if raining or (p is not None and p >= 60):
-            if p is not None:
-                return f"Лучше возьми зонт: {where} вероятность осадков около {p}%.".strip()
-            return f"Лучше возьми зонт: {where} возможны осадки.".strip()
+            detail = f"вероятность осадков около {p}%" if p is not None else "возможны осадки"
+            where_part = " ".join(x for x in (where, detail) if x)
+            return f"Лучше возьми зонт {time_phrase}: {where_part}.".strip()
         if p is not None and p >= 30:
-            return f"Зонт на всякий случай: вероятность осадков около {p}%.".strip()
-        return f"Скорее всего зонт не нужен: {where} в ближайший час осадков не ожидается.".strip()
+            return f"Зонт на всякий случай {time_phrase}: вероятность осадков около {p}%.".strip()
+        where_part = " ".join(x for x in (where, f"{time_phrase} осадков не ожидается") if x)
+        return f"Скорее всего зонт не нужен: {where_part}.".strip()
 
     if mode == "weather_clothes":
         # base on feels-like
@@ -80,11 +91,12 @@ def render_weather_answer_ru(
             tip = "лёгкая куртка или кофта"
         else:
             tip = "лёгкая одежда"
-        return f"Сейчас {where} около {t}°, ощущается как {feels}°. Я бы выбрал(а) {tip}.".strip()
+        lead = " ".join(x for x in (now_word, where, "будет" if when_label else "") if x)
+        return f"{lead} около {t}°, ощущается как {feels}°. Я бы выбрал(а) {tip}.".strip()
 
     # weather_now (default)
     parts: list[str] = []
-    parts.append(f"Сейчас {where} {t}°".strip())
+    parts.append(" ".join(x for x in (now_word, where, f"{t}°") if x))
     if feels != t:
         parts.append(f"ощущается как {feels}°")
     if desc:

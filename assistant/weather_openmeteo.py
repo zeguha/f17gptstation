@@ -39,6 +39,24 @@ class WeatherNow:
     timezone: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class ForecastPoint:
+    # Local time as returned by the API (respects timezone=auto), "YYYY-MM-DDTHH:MM".
+    time_local: str
+    temperature_c: float
+    apparent_c: float
+    wind_ms: float
+    humidity_pct: float | None
+    precipitation_prob_pct: int | None
+    weather_code: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastSeries:
+    timezone: str | None
+    points: list[ForecastPoint]
+
+
 def _retry_cfg() -> RetryConfig:
     # Weather APIs are sometimes flaky; keep retries small.
     return RetryConfig(max_attempts=3, base_delay_sec=0.4, max_delay_sec=4.0)
@@ -155,4 +173,57 @@ async def fetch_weather_now(lat: float, lon: float, *, timeout_sec: float = 6.0)
         precipitation_prob_pct=prob0,
         weather_code=_i(cur.get("weather_code")),
         timezone=(str(data.get("timezone")) if data.get("timezone") else None),
+    )
+
+
+async def fetch_weather_forecast(lat: float, lon: float, *, timeout_sec: float = 6.0) -> ForecastSeries:
+    """Hourly forecast for the next several days (for "tomorrow"/"on Friday" style queries)."""
+
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}&longitude={lon}"
+        "&hourly=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation_probability,weather_code,wind_speed_10m"
+        "&forecast_days=8&timezone=auto"
+    )
+
+    async def call() -> dict:
+        return await _get_json(url, timeout_sec=timeout_sec)
+
+    data = await with_retries(call, cfg=_retry_cfg(), what="open-meteo.forecast")
+    hourly = data.get("hourly") or {}
+
+    times = hourly.get("time") or []
+    temps = hourly.get("temperature_2m") or []
+    feels = hourly.get("apparent_temperature") or []
+    hums = hourly.get("relative_humidity_2m") or []
+    probs = hourly.get("precipitation_probability") or []
+    codes = hourly.get("weather_code") or []
+    winds = hourly.get("wind_speed_10m") or []
+
+    def _f(x):
+        return None if x is None else float(x)
+
+    def _i(x):
+        return None if x is None else int(x)
+
+    points: list[ForecastPoint] = []
+    for idx, time_local in enumerate(times):
+        try:
+            points.append(
+                ForecastPoint(
+                    time_local=str(time_local),
+                    temperature_c=float(temps[idx]),
+                    apparent_c=float(feels[idx]),
+                    wind_ms=float(winds[idx]),
+                    humidity_pct=_f(hums[idx]) if idx < len(hums) else None,
+                    precipitation_prob_pct=_i(probs[idx]) if idx < len(probs) else None,
+                    weather_code=_i(codes[idx]) if idx < len(codes) else None,
+                )
+            )
+        except (IndexError, TypeError, ValueError):
+            continue
+
+    return ForecastSeries(
+        timezone=(str(data.get("timezone")) if data.get("timezone") else None),
+        points=points,
     )

@@ -47,6 +47,38 @@ class TestSpotifyIntent(unittest.TestCase):
         self.assertEqual(i.playlist_name, "дорога")
         self.assertIsNone(i.query)
 
+    def test_play_playlist(self):
+        i = detect_spotify_intent("включи плейлист вечерний чилл")
+        self.assertIsNotNone(i)
+        assert i is not None
+        self.assertEqual(i.action, "play_named")
+        self.assertEqual(i.content_kind, "playlist")
+        self.assertEqual(i.query, "вечерний чилл")
+
+    def test_play_playlist_stt_split_variant(self):
+        # STT (Whisper) sometimes mishears "плейлист" as "плэй лист" (split, wrong vowel).
+        i = detect_spotify_intent("включи плэй лист покачивает")
+        self.assertIsNotNone(i)
+        assert i is not None
+        self.assertEqual(i.action, "play_named")
+        self.assertEqual(i.content_kind, "playlist")
+        self.assertEqual(i.query, "покачивает")
+
+    def test_play_playlist_with_filler_words(self):
+        i = detect_spotify_intent("включи мне пожалуйста плейлист любимые треки")
+        self.assertIsNotNone(i)
+        assert i is not None
+        self.assertEqual(i.action, "play_named")
+        self.assertEqual(i.content_kind, "playlist")
+        self.assertEqual(i.query, "любимые треки")
+
+    def test_playlist_add_current_stt_split_variant(self):
+        i = detect_spotify_intent("добавь этот трек в плей лист дорога")
+        self.assertIsNotNone(i)
+        assert i is not None
+        self.assertEqual(i.action, "playlist_add")
+        self.assertEqual(i.playlist_name, "дорога")
+
     def test_like_named(self):
         i = detect_spotify_intent("добавь в понравившиеся one more time")
         self.assertIsNotNone(i)

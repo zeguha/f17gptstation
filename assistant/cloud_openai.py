@@ -69,6 +69,8 @@ class OpenAIStt(OpenAIHttp, SttClient):
         data = aiohttp.FormData()
         data.add_field("model", self.cfg.openai_stt_model)
         data.add_field("language", language)
+        if self.cfg.openai_stt_prompt:
+            data.add_field("prompt", self.cfg.openai_stt_prompt)
         data.add_field("file", wav_bytes, filename="audio.wav", content_type="audio/wav")
 
         async def _call() -> SttResult:
@@ -134,7 +136,7 @@ class OpenAITts(OpenAIHttp, TtsClient):
             "model": self.cfg.openai_tts_model,
             "voice": self.cfg.openai_tts_voice,
             "input": text,
-            "format": "wav",
+            "response_format": "wav",
         }
 
         async def _call() -> TtsResult:

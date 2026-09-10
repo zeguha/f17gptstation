@@ -93,6 +93,10 @@ _RE_QUEUE_NAMED = re.compile(r"\b(поставь\s+в\s+очередь|доба�
 
 _RE_PLAY_ARTIST = re.compile(r"\b(включи|запусти|поставь)\s+(исполнителя|артиста)\s+(.{2,120})\b")
 _RE_PLAY_GENRE = re.compile(r"\b(включи|запусти|поставь)\s+жанр\s+(.{2,80})\b")
+# Name after "плейлист" is matched separately from the play verb (checked via
+# _RE_PLAY below) so filler words don't break it, e.g. "включи мне, пожалуйста,
+# плейлист X" or STT dropping/reordering words.
+_RE_PLAYLIST_NAME = re.compile(r"\bплейлист\s+(.{2,120})\b")
 
 _RE_PLAYLIST_ADD_CURRENT = re.compile(r"\b(добавь|сохрани)\s+(этот\s+трек|текущ(ий|ую)\s+трек)\s+в\s+плейлист\s+(.{2,80})\b")
 _RE_PLAYLIST_REMOVE_CURRENT = re.compile(r"\b(удали|убери)\s+(этот\s+трек|текущ(ий|ую)\s+трек)\s+из\s+плейлиста\s+(.{2,80})\b")
@@ -102,6 +106,17 @@ _RE_PLAYLIST_REMOVE_BY_NAME = re.compile(r"\b(удали|убери)\s+(.{2,120}
 
 _RE_LIKE_NAMED = re.compile(r"\b(лайкни|добавь\s+в\s+понравившиеся)\s+(.{2,120})\b")
 _RE_UNLIKE_NAMED = re.compile(r"\b(убери\s+из\s+понравившихся)\s+(.{2,120})\b")
+
+
+# STT (Whisper/OpenAI) often splits/mishears the loanword "плейлист" as
+# "плей лист" / "плэй лист" / "плэйлист" etc. Normalize all such variants to
+# the canonical "плейлист" (keeping any inflected ending, e.g. "плейлиста")
+# so every playlist-related pattern below matches regardless of STT quirks.
+_RE_PLAYLIST_VARIANT = re.compile(r"\bпл[еэ]й\s*лист(\w*)\b")
+
+
+def _normalize_playlist_word(t: str) -> str:
+    return _RE_PLAYLIST_VARIANT.sub(lambda m: "плейлист" + (m.group(1) or ""), t)
 
 
 def _strip_quotes(s: str) -> str:
@@ -115,6 +130,7 @@ def detect_spotify_intent(normalized_text: str) -> SpotifyIntent | None:
     t = (normalized_text or "").strip()
     if not t:
         return None
+    t = _normalize_playlist_word(t)
 
     if _RE_CONNECT.search(t):
         return SpotifyIntent(action="spotify_connect", confidence=0.9)
@@ -177,6 +193,17 @@ def detect_spotify_intent(normalized_text: str) -> SpotifyIntent | None:
         q = _strip_quotes(m.group(2))
         # Use Spotify search query syntax.
         return SpotifyIntent(action="play_named", query=f"genre:{q}", content_kind="track", confidence=0.65)
+    m = _RE_PLAYLIST_NAME.search(t)
+    if m and _RE_PLAY.search(t):
+        q = _strip_quotes(m.group(1))
+        urlm = _RE_URL.search(q)
+        return SpotifyIntent(
+            action="play_named",
+            query=q,
+            uri_or_url=(urlm.group(1) if urlm else None),
+            content_kind="playlist",
+            confidence=0.8,
+        )
 
     # Queue / play named
     m = _RE_QUEUE_NAMED.search(t)

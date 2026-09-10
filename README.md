@@ -7,7 +7,7 @@ GPT Station — экспериментальный голосовой ассис
 - Wake-фраза и запись голосовой команды через локальный пайплайн.
 - Локальное распознавание через Vosk и опциональный backend whisper.cpp.
 - Облачный режим OpenAI для STT, LLM и TTS.
-- Погодный навык без LLM на базе Open-Meteo.
+- Погодный навык без LLM на базе Open-Meteo: текущая погода и погода на конкретное время (сегодня/завтра/послезавтра, день недели, утро/день/вечер/ночь) в текущем или названном месте.
 - Управление Spotify через OAuth PKCE без хранения пароля.
 - Управление WiZ/Gauss лампами по локальной сети.
 - Systemd unit для Raspberry Pi.
@@ -16,13 +16,15 @@ GPT Station — экспериментальный голосовой ассис
 ## Требования
 
 - Python 3.11 или новее.
-- macOS, Linux или Raspberry Pi OS.
+- macOS, Linux, Raspberry Pi OS или Windows (см. заметку ниже про сборку `webrtcvad`).
 - Микрофон и устройство вывода звука.
 - Для локального Vosk: модель в `assistant/models/vosk-model-ru`.
 - Для cloud-режима: OpenAI API key в переменной `OPENAI_API_KEY`.
 - Для Spotify: свой `SPOTIFY_CLIENT_ID` из Spotify Developer Dashboard.
 
 ## Быстрый старт
+
+macOS / Linux (bash/zsh):
 
 ```bash
 python3 -m venv .venv
@@ -32,7 +34,35 @@ python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
+Windows (PowerShell):
+
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+```
+
+Если PowerShell не даёт выполнить `Activate.ps1` (`running scripts is disabled on this system`), разрешите скрипты для текущего пользователя один раз:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+После активации venv внутри него команда называется `python` (не `python3`) — например: `python -m assistant.spotify_cli auth`.
+
 После копирования заполните `.env` реальными локальными значениями. Файл `.env` игнорируется Git и не должен попадать в репозиторий.
+
+### Заметка про `webrtcvad` на Windows
+
+В `requirements.txt` используется `webrtcvad-wheels` (а не оригинальный `webrtcvad`) — это форк с готовыми wheel-сборками под Windows/macOS/Linux, даёт тот же модуль `webrtcvad`, но не требует компилятора C++ при установке.
+
+Единственное исключение — совсем новые версии Python (на момент написания это Python 3.14): под них готовых wheel'ов ещё нет ни у `webrtcvad`, ни у `webrtcvad-wheels`, и `pip install` попытается собрать из исходников с ошибкой `Microsoft Visual C++ 14.0 or greater is required`. Варианты:
+
+- Использовать Python 3.12 или 3.13 для venv (под них wheel'ы уже есть). Если у вас установлен новый **Python Install Manager** (команда `py`), поставить его можно так: `py install 3.12`, затем `py -3.12 -m venv .venv`.
+- Либо поставить [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (компонент "Desktop development with C++") и собрать из исходников.
+- Либо пропустить `webrtcvad` вовсе — в коде (`assistant/vad.py`) он опциональный: при отсутствии модуля VAD автоматически откатывается на более грубый энергетический режим определения речи. Достаточно поставить остальные зависимости: `pip install aiohttp numpy requests sounddevice soundfile vosk certifi pytest`.
 
 ## Настройка переменных окружения
 
@@ -53,6 +83,7 @@ WAKE_PHRASE=олег
 | `OPENAI_API_KEY` | API-ключ OpenAI. Обязателен для cloud-режима. |
 | `OPENAI_BASE_URL` | URL OpenAI-compatible API. По умолчанию `https://api.openai.com/v1`. |
 | `OPENAI_STT_MODEL` | Модель распознавания речи. |
+| `OPENAI_STT_PROMPT` | Подсказка-словарь для STT, снижает ошибки на доменных словах («плейлист» и т.п.). Можно дописать свои названия плейлистов/исполнителей. |
 | `OPENAI_LLM_MODEL` | Модель диалога. |
 | `OPENAI_TTS_MODEL` | Модель синтеза речи. |
 | `INPUT_DEVICE` | ID микрофона. Часто обязателен на Raspberry Pi. |
@@ -65,6 +96,8 @@ WAKE_PHRASE=олег
 | `WIZ_IPS` | Необязательный список IP-адресов ламп WiZ/Gauss. |
 
 ## Локальный запуск
+
+Команды ниже даны для macOS/Linux (`python3`). На Windows, после активации venv (`.venv\Scripts\Activate.ps1`), используйте `python` — команды `python3` в venv нет.
 
 ### Cloud-режим
 

@@ -13,19 +13,120 @@ from __future__ import annotations
 import time
 
 import re
+from datetime import date, datetime, timedelta
 
 from .config import WeatherConfig
 from .geo import GeoUnavailable, get_location
 from .intent_weather import WeatherIntent
 from .nlg_weather_ru import render_weather_answer_ru
-from .weather_openmeteo import fetch_weather_now, geocode_place, reverse_geocode
+from .weather_openmeteo import (
+    ForecastPoint,
+    ForecastSeries,
+    WeatherNow,
+    fetch_weather_forecast,
+    fetch_weather_now,
+    geocode_place,
+    reverse_geocode,
+)
 
 
 class WeatherSkillError(RuntimeError):
     pass
 
 
-_WEATHER_CACHE: dict[tuple[int, int], tuple[float, str]] = {}
+_WEATHER_CACHE: dict[tuple[int, int, str], tuple[float, str]] = {}
+
+_WEEKDAY_LABELS_RU: dict[int, str] = {
+    0: "в понедельник",
+    1: "во вторник",
+    2: "в среду",
+    3: "в четверг",
+    4: "в пятницу",
+    5: "в субботу",
+    6: "в воскресенье",
+}
+
+_PART_OF_DAY_LABELS_RU: dict[str, str] = {
+    "morning": "утром",
+    "day": "днём",
+    "evening": "вечером",
+    "night": "ночью",
+}
+
+_PART_OF_DAY_HOUR: dict[str, int] = {
+    "morning": 9,
+    "day": 13,
+    "evening": 19,
+    "night": 23,
+}
+
+
+def _resolve_target_date(user_intent: WeatherIntent, *, today: date) -> tuple[date, int]:
+    """Return (target_date, day_offset_from_today)."""
+
+    if user_intent.weekday is not None:
+        offset = (user_intent.weekday - today.weekday()) % 7
+        return today + timedelta(days=offset), offset
+    offset = user_intent.day_offset or 0
+    return today + timedelta(days=offset), offset
+
+
+def _day_label_ru(*, offset: int, weekday: int | None) -> str:
+    if offset == 0:
+        return "сегодня"
+    if offset == 1:
+        return "завтра"
+    if offset == 2 and weekday is None:
+        return "послезавтра"
+    if weekday is not None:
+        return _WEEKDAY_LABELS_RU[weekday]
+    return "послезавтра"
+
+
+def _when_label_ru(user_intent: WeatherIntent, *, offset: int) -> str:
+    day_label = _day_label_ru(offset=offset, weekday=user_intent.weekday)
+    part_label = _PART_OF_DAY_LABELS_RU.get(user_intent.part_of_day or "")
+    if part_label:
+        return f"{day_label} {part_label}"
+    return day_label
+
+
+def _is_forecast_request(user_intent: WeatherIntent) -> bool:
+    if user_intent.weekday is not None:
+        return True
+    if user_intent.day_offset is not None and user_intent.day_offset > 0:
+        return True
+    if user_intent.part_of_day is not None:
+        return True
+    return False
+
+
+def _closest_point(points: list[ForecastPoint], *, target_date: date, target_hour: int) -> ForecastPoint | None:
+    prefix = target_date.strftime("%Y-%m-%d")
+    same_day = [p for p in points if p.time_local.startswith(prefix)]
+    if not same_day:
+        return None
+
+    def _hour_of(p: ForecastPoint) -> int:
+        try:
+            return int(p.time_local[11:13])
+        except (ValueError, IndexError):
+            return 0
+
+    return min(same_day, key=lambda p: abs(_hour_of(p) - target_hour))
+
+
+def _forecast_point_to_weather_now(p: ForecastPoint, *, timezone: str | None) -> WeatherNow:
+    return WeatherNow(
+        temperature_c=p.temperature_c,
+        apparent_c=p.apparent_c,
+        wind_ms=p.wind_ms,
+        humidity_pct=p.humidity_pct,
+        precipitation_mm=None,
+        precipitation_prob_pct=p.precipitation_prob_pct,
+        weather_code=p.weather_code,
+        timezone=timezone,
+    )
 
 
 _RU_ENDINGS: tuple[str, ...] = (
@@ -94,13 +195,13 @@ def _place_candidates_ru(place_text: str) -> list[str]:
     return out
 
 
-def _cache_key(lat: float, lon: float) -> tuple[int, int]:
+def _cache_key(lat: float, lon: float, *, when: str) -> tuple[int, int, str]:
     # Round to ~1km to improve cache hits and reduce privacy risk.
-    return (int(round(float(lat) * 100)), int(round(float(lon) * 100)))
+    return (int(round(float(lat) * 100)), int(round(float(lon) * 100)), when)
 
 
-def _cache_get(lat: float, lon: float, *, ttl_sec: float) -> str | None:
-    k = _cache_key(lat, lon)
+def _cache_get(lat: float, lon: float, *, when: str, ttl_sec: float) -> str | None:
+    k = _cache_key(lat, lon, when=when)
     item = _WEATHER_CACHE.get(k)
     if not item:
         return None
@@ -110,8 +211,8 @@ def _cache_get(lat: float, lon: float, *, ttl_sec: float) -> str | None:
     return val
 
 
-def _cache_put(lat: float, lon: float, text: str) -> None:
-    k = _cache_key(lat, lon)
+def _cache_put(lat: float, lon: float, text: str, *, when: str) -> None:
+    k = _cache_key(lat, lon, when=when)
     _WEATHER_CACHE[k] = (time.time(), text)
 
 
@@ -166,11 +267,31 @@ async def handle_weather_intent(user_intent: WeatherIntent, *, cfg: WeatherConfi
 
     assert lat is not None and lon is not None
 
-    cached = _cache_get(lat, lon, ttl_sec=cfg.weather_cache_ttl_sec)
+    if not _is_forecast_request(user_intent):
+        cached = _cache_get(lat, lon, when="now", ttl_sec=cfg.weather_cache_ttl_sec)
+        if cached is not None:
+            return cached
+
+        w = await fetch_weather_now(lat, lon, timeout_sec=cfg.weather_timeout_sec)
+        text = render_weather_answer_ru(w, place=place_name, mode=user_intent.intent)
+        _cache_put(lat, lon, text, when="now")
+        return text
+
+    target_date, offset = _resolve_target_date(user_intent, today=datetime.now().date())
+    when_label = _when_label_ru(user_intent, offset=offset)
+    when_key = f"{target_date.isoformat()}:{user_intent.part_of_day or ''}"
+
+    cached = _cache_get(lat, lon, when=when_key, ttl_sec=cfg.weather_cache_ttl_sec)
     if cached is not None:
         return cached
 
-    w = await fetch_weather_now(lat, lon, timeout_sec=cfg.weather_timeout_sec)
-    text = render_weather_answer_ru(w, place=place_name, mode=user_intent.intent)
-    _cache_put(lat, lon, text)
+    series: ForecastSeries = await fetch_weather_forecast(lat, lon, timeout_sec=cfg.weather_timeout_sec)
+    target_hour = _PART_OF_DAY_HOUR.get(user_intent.part_of_day or "", 13)
+    point = _closest_point(series.points, target_date=target_date, target_hour=target_hour)
+    if point is None:
+        raise WeatherSkillError("Не нашёл прогноз на этот день. Спроси про ближайшие несколько дней.")
+
+    w = _forecast_point_to_weather_now(point, timezone=series.timezone)
+    text = render_weather_answer_ru(w, place=place_name, mode=user_intent.intent, when_label=when_label)
+    _cache_put(lat, lon, text, when=when_key)
     return text

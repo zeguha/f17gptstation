@@ -19,6 +19,7 @@ We ensure this by:
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -32,6 +33,16 @@ from .vad import Vad, VadConfig
 
 
 log = logging.getLogger("assistant.pipeline")
+
+
+class PipelineCancelled(Exception):
+    """Raised out of a blocking pipeline call when `cancel_event` is set.
+
+    `wait_for_wake()`/`record_command()` otherwise loop with no bound while
+    waiting for speech, so this is how a caller running them on a worker
+    thread (e.g. via `asyncio.to_thread`) can get them to return promptly on
+    shutdown instead of blocking process exit until the wake phrase is heard.
+    """
 
 
 class StopReason(str, Enum):
@@ -113,11 +124,13 @@ class WakeCommandPipeline:
         audio: AudioStream,
         wake_engine: VoskEngine,
         command_engine: AsrEngine,
+        cancel_event: Optional[threading.Event] = None,
     ):
         self.cfg = cfg
         self.audio = audio
         self.wake_engine = wake_engine
         self.command_engine = command_engine
+        self._cancel_event = cancel_event
 
         self.vad = Vad(
             VadConfig(
@@ -155,6 +168,9 @@ class WakeCommandPipeline:
         window_frames: Deque[bool] = deque(maxlen=max(1, int(self.cfg.wake_confirm_window_sec * 1000 / self.cfg.frame_ms)))
 
         while True:
+            if self._cancel_event is not None and self._cancel_event.is_set():
+                raise PipelineCancelled("wait_for_wake: cancelled")
+
             ch = self.audio.read(timeout=0.5)
             if ch is None:
                 continue
@@ -272,6 +288,9 @@ class WakeCommandPipeline:
         last_speech_t = None
 
         while True:
+            if self._cancel_event is not None and self._cancel_event.is_set():
+                raise PipelineCancelled("record_command: cancelled")
+
             now = time.monotonic()
             if not started and (now - start_wait) > self.cfg.command_start_timeout_sec:
                 self.false_wakes += 1

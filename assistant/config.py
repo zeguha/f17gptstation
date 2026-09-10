@@ -58,7 +58,19 @@ class CloudConfig:
     # OpenAI
     openai_api_key: str = os.environ.get("OPENAI_API_KEY", "")
     openai_base_url: str = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    openai_stt_model: str = os.environ.get("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
+    openai_stt_model: str = os.environ.get("OPENAI_STT_MODEL", "gpt-4o-transcribe")
+    # Whisper-style "prompt" hint: biases transcription toward this vocabulary/spelling.
+    # Helps with domain words that otherwise get mis-heard/split (e.g. "плейлист").
+    # Add your own playlist/artist names here (comma-separated) if they keep getting
+    # misrecognized.
+    openai_stt_prompt: str = os.environ.get(
+        "OPENAI_STT_PROMPT",
+        "Голосовой ассистент. Плейлист, Spotify, трек, исполнитель, альбом, "
+        "включи плейлист, добавь в очередь, лайк, следующий трек, предыдущий трек, "
+        "пауза, громкость, перемешивание, повтор, "
+        "лампа, свет, яркость, кельвин, сценарий, ночной режим, "
+        "погода, температура, градус, зонт, осадки, ветер.",
+    )
     openai_llm_model: str = os.environ.get("OPENAI_LLM_MODEL", "gpt-5-mini")
     # Some models only support the default temperature. Set env to "default" to omit.
     openai_llm_temperature: float | None = _env_float_opt("OPENAI_LLM_TEMPERATURE", None)

@@ -34,10 +34,28 @@ def _clamp(v: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(v)))
 
 
-def _udp_broadcast_discover_one(*, broadcast_addr: str, timeout_sec: float = 1.2) -> list[dict]:
+def _udp_broadcast_discover(
+    *, broadcast_addrs: list[str], timeout_sec: float = 1.5, bind_ip: str | None = None
+) -> list[dict]:
     """Blocking UDP broadcast discovery.
 
+    Sends the discovery probe to every candidate broadcast address up front
+    (each `sendto` is effectively instant — it doesn't wait for a reply), then
+    listens once for `timeout_sec` collecting whatever comes back from any of
+    them. This keeps total discovery time bounded to ~`timeout_sec` regardless
+    of how many candidate addresses we try, instead of the old one-timeout-
+    per-address loop, which could add up to several seconds and blow past the
+    caller's overall request timeout before even finishing the sweep.
+
     Returns raw response dicts.
+
+    `bind_ip`, when given, binds the socket to that local address instead of
+    the wildcard ("" / INADDR_ANY). This matters when a VPN is active: a
+    socket bound to INADDR_ANY lets the OS route the broadcast destination
+    through whichever interface currently owns the default route, which on a
+    full-tunnel VPN is the tunnel — so the packet never reaches the LAN and
+    the bulb never sees it. Binding to the LAN adapter's own IP keeps the
+    broadcast on that link regardless of the VPN's default route.
     """
 
     payload = {"method": "getSystemConfig", "params": {}}
@@ -46,11 +64,22 @@ def _udp_broadcast_discover_one(*, broadcast_addr: str, timeout_sec: float = 1.2
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        s.settimeout(float(timeout_sec))
-        s.bind(("", 0))
-        # NOTE: some networks/OS setups can reject the global broadcast route.
-        # We let the caller handle OSError and provide fallback (manual IPs).
-        s.sendto(msg, (str(broadcast_addr), WIZ_PORT))
+        # Short poll interval so we keep collecting replies for the whole window
+        # instead of stopping at the first one.
+        s.settimeout(0.2)
+        s.bind((bind_ip or "", 0))
+
+        last_err: OSError | None = None
+        sent_any = False
+        for addr in broadcast_addrs:
+            try:
+                s.sendto(msg, (str(addr), WIZ_PORT))
+                sent_any = True
+            except OSError as e:
+                last_err = e
+                continue
+        if not sent_any and last_err is not None:
+            raise last_err
 
         out: list[dict] = []
         t_end = time.time() + float(timeout_sec)
@@ -58,7 +87,7 @@ def _udp_broadcast_discover_one(*, broadcast_addr: str, timeout_sec: float = 1.2
             try:
                 data, addr = s.recvfrom(65535)
             except socket.timeout:
-                break
+                continue
             try:
                 obj = json.loads(data.decode("utf-8", errors="ignore"))
                 if isinstance(obj, dict):
@@ -197,27 +226,31 @@ class WizLanAdapter:
 
     async def discover(self) -> list[Lamp]:
         raws: list[dict] = []
-        # 1) Try broadcast discovery.
+        # If a VPN is active, its default route can otherwise swallow the broadcast
+        # (see `_udp_broadcast_discover`). Binding to the LAN adapter's own IP
+        # keeps discovery working without having to disable the VPN. `WIZ_LOCAL_IP`
+        # lets the user pin this explicitly when the auto-guess picks the VPN's IP.
+        local_ips = _local_private_ips_best_effort()
+        bind_ip = local_ips[0] if local_ips else None
+
+        # 1) Try broadcast discovery. All candidate addresses are sent up front and
+        # answers are collected in one bounded window (see docstring) so this stays
+        # well under the skill-level request timeout regardless of candidate count.
         try:
-            for bc in _broadcast_candidates():
-                try:
-                    raws = await asyncio.to_thread(
-                        _udp_broadcast_discover_one,
-                        broadcast_addr=bc,
-                        timeout_sec=max(0.5, self.timeout_sec),
-                    )
-                except OSError:
-                    raws = []
-                    continue
-                if raws:
-                    break
+            raws = await asyncio.to_thread(
+                _udp_broadcast_discover,
+                broadcast_addrs=_broadcast_candidates(),
+                timeout_sec=max(2.0, self.timeout_sec),
+                bind_ip=bind_ip,
+            )
         except OSError as e:
             # Typical on misconfigured host/network: "No route to host".
             if not self.manual_ips:
                 raise GaussAdapterError(
                     "Не могу отправить broadcast для поиска WiZ ламп (UDP 255.255.255.255:38899). "
                     "Проверь, что ассистент в той же Wi‑Fi сети и на роутере выключен AP/client isolation. "
-                    "Если включён VPN, временно отключи его для устройства ассистента. "
+                    "Если включён VPN — задай WIZ_LOCAL_IP=<IP компьютера в локальной сети>, "
+                    "чтобы поиск шёл через сетевую карту, а не через VPN. "
                     "Либо задай IP ламп вручную: WIZ_IPS=192.168.1.10,192.168.1.11"
                 ) from e
             raws = []

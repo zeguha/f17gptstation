@@ -9,6 +9,7 @@ Fallback: sounddevice output.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -16,6 +17,9 @@ import tempfile
 from dataclasses import dataclass
 import threading
 from typing import Optional
+
+
+log = logging.getLogger("assistant.audio_playback")
 
 
 @dataclass(slots=True)
@@ -82,6 +86,7 @@ def play_wav_bytes(wav_bytes: bytes, *, device: Optional[int] = None) -> Playbac
         sd.wait()
         return PlaybackInfo(backend="sounddevice")
     except Exception:
+        log.exception("sounddevice playback failed (wav_bytes=%d, device=%s)", len(wav_bytes), device)
         return PlaybackInfo(backend="failed")
 
 

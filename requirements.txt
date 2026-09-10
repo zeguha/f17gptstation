@@ -4,6 +4,6 @@ requests
 sounddevice
 soundfile
 vosk
-webrtcvad
+webrtcvad-wheels
 certifi
 pytest

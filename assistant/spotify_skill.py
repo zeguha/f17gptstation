@@ -13,6 +13,7 @@ Responsibilities
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 
 import aiohttp
@@ -22,6 +23,9 @@ from .net import HttpStatusError
 from .spotify_client import SpotifyApiError, SpotifyAuthRequired, SpotifyClient, SpotifyNoActiveDevice
 from .spotify_context import clear_pending, get_pending, set_pending
 from .spotify_types import SpotifyDevice
+
+
+log = logging.getLogger("assistant.spotify_skill")
 
 
 class SpotifySkillError(RuntimeError):
@@ -340,12 +344,35 @@ async def handle_spotify_intent(
                 return ("Что именно включить? Название или ссылку на Spotify.", preferred_device_name)
 
             uri = _spotify_uri_from_any(q)
+            log.info("play/queue_named: content_kind=%s query=%r uri_from_link=%r", user_intent.content_kind, q, uri)
+
+            if uri is None and user_intent.content_kind == "playlist":
+                # Spotify's public /search for type=playlist mostly surfaces
+                # curated/public playlists, not the user's own — which is what
+                # people usually mean by "включи плейлист <название>". Look
+                # there first (same lookup used by playlist_add/playlist_remove).
+                pls = await client.get_my_playlists(limit=50, max_pages=3)
+                name = q.strip().lower()
+                cand = [p for p in pls if p.name.strip().lower() == name]
+                if not cand:
+                    cand = [p for p in pls if name in p.name.strip().lower()]
+                log.info(
+                    "playlist lookup in my library: query=%r my_playlists=%r matched=%r",
+                    name,
+                    [p.name for p in pls],
+                    [p.name for p in cand],
+                )
+                if cand:
+                    uri = cand[0].uri
+
             if uri is None:
                 # Decide search types priority.
                 # For short queries like "нирвана" users often mean artist.
                 words = [w for w in re.split(r"\s+", q.strip()) if w]
                 if user_intent.content_kind == "artist":
                     types = ["artist"]
+                elif user_intent.content_kind == "playlist":
+                    types = ["playlist"]
                 elif user_intent.content_kind == "auto" and len(words) <= 2:
                     types = ["artist", "track", "album", "playlist"]
                 else:
@@ -354,7 +381,15 @@ async def handle_spotify_intent(
                 # We intentionally do not ask the user to choose for common "включи <запрос>".
                 # Spotify returns relevance-ranked results; we pick the best by type priority.
                 items = await client.search(q, types=types, limit=5)
+                log.info(
+                    "spotify search: query=%r types=%s results=%r",
+                    q,
+                    types,
+                    [(it.kind, it.name, it.uri) for it in items],
+                )
                 if not items:
+                    if user_intent.content_kind == "playlist":
+                        return ("Не нашёл такой плейлист ни в твоей библиотеке, ни в поиске Spotify.", preferred_device_name)
                     return ("Не нашёл в Spotify. Скажи точнее: название и исполнителя.", preferred_device_name)
                 uri = items[0].uri
 

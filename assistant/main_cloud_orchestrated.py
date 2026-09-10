@@ -18,6 +18,7 @@ import contextlib
 import io
 import logging
 import os
+import threading
 import time
 import wave
 
@@ -30,7 +31,7 @@ from .dialog import DialogState
 from .intent_lights import detect_lights_intent
 from .intent_weather import detect_weather_intent
 from .intent_spotify import detect_spotify_intent
-from .pipeline_vosk import PipelineConfig, WakeCommandPipeline
+from .pipeline_vosk import PipelineCancelled, PipelineConfig, WakeCommandPipeline
 from .speech import SPEAKING_EVENT, get_default_input_device
 from .stop_word import StopWordConfig, StopWordDetector
 from .utils import normalize_text
@@ -118,7 +119,11 @@ async def _audio_loop(
     stop_event: asyncio.Event,
 ) -> None:
     while not stop_event.is_set():
-        interaction = await asyncio.to_thread(pipeline.run_once)
+        try:
+            interaction = await asyncio.to_thread(pipeline.run_once)
+        except PipelineCancelled:
+            log.info("audio_loop: cancelled, stopping")
+            break
         if interaction is None:
             continue
         log.info(
@@ -195,6 +200,14 @@ async def _worker_llm(
                     None if wi_probe is None else wi_probe.intent,
                     norm,
                 )
+                if si_probe is not None:
+                    log.info(
+                        "ROUTE probe spotify detail: action=%s content_kind=%s query=%r uri_or_url=%r",
+                        si_probe.action,
+                        si_probe.content_kind,
+                        si_probe.query,
+                        si_probe.uri_or_url,
+                    )
 
             # Deterministic skill routing (lights)
             if cfg.lights.enabled:
@@ -413,6 +426,12 @@ async def run() -> None:
         ignore_event = SPEAKING_EVENT
 
     stop_event = asyncio.Event()
+    # `_audio_loop` calls `pipeline.run_once()` via `asyncio.to_thread`, which can
+    # block indefinitely inside `wait_for_wake()` if the wake phrase is never heard.
+    # `stop_event` (asyncio.Event) isn't visible/safe to poll from that worker
+    # thread, so we use a plain threading.Event the pipeline checks internally to
+    # unblock promptly on shutdown instead of hanging process exit.
+    cancel_event = threading.Event()
     playback = PlaybackController()
 
     stop_words = [w.strip() for w in cfg.turn.stop_words.split(",") if w.strip()]
@@ -447,6 +466,7 @@ async def run() -> None:
             audio=audio,
             wake_engine=wake_engine,
             command_engine=wake_engine,
+            cancel_event=cancel_event,
         )
 
         tasks = []
@@ -491,6 +511,7 @@ async def run() -> None:
             log.exception("asyncio.gather failed")
         finally:
             stop_event.set()
+            cancel_event.set()
             for t in tasks:
                 t.cancel()
             with contextlib.suppress(Exception):
