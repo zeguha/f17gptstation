@@ -32,6 +32,7 @@ from .intent_lights import detect_lights_intent
 from .intent_weather import detect_weather_intent
 from .intent_spotify import detect_spotify_intent
 from .pipeline_vosk import PipelineCancelled, PipelineConfig, WakeCommandPipeline
+from .postprocess import clean_for_speech
 from .speech import SPEAKING_EVENT, get_default_input_device
 from .stop_word import StopWordConfig, StopWordDetector
 from .utils import normalize_text
@@ -310,6 +311,13 @@ async def _worker_tts(
     while not stop_event.is_set():
         interaction, user_text, answer = await in_q.get()
         try:
+            if not answer:
+                await _put_latest(out_q, (interaction, user_text, answer, b""))
+                continue
+            # Web-search-grounded LLM answers embed markdown citations that
+            # read fine but sound like noise out loud; dialog history keeps
+            # the original (already stored before this stage).
+            answer = clean_for_speech(answer)
             if not answer:
                 await _put_latest(out_q, (interaction, user_text, answer, b""))
                 continue

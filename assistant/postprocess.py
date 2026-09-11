@@ -21,6 +21,34 @@ def normalize_text(s: str) -> str:
     s = _re_ws.sub(" ", s).strip()
     return s
 
+
+# Web-search-grounded models (e.g. gpt-5-search-api) routinely cite sources as
+# "([site.com](https://...))" — readable as text, unusable read aloud by TTS.
+_re_wrapped_citation = re.compile(r"\(\[([^\]]+)\]\((?:https?://|www\.)[^()]*\)\)")
+_re_md_link = re.compile(r"\[([^\]]+)\]\((?:https?://|www\.)[^()]*\)")
+_re_bare_url = re.compile(r"https?://\S+")
+_re_md_header = re.compile(r"^\s{0,3}#{1,6}\s*", re.MULTILINE)
+_re_md_hr = re.compile(r"^\s*[-*_]{3,}\s*$", re.MULTILINE)
+_re_md_emphasis = re.compile(r"(\*\*\*|\*\*|\*|__)")
+
+
+def clean_for_speech(text: str) -> str:
+    """Strip markdown links/citations/headers from LLM text before TTS.
+
+    Meant for text that is about to be spoken, not for text kept in dialog
+    history — the citations are still useful context for follow-up turns.
+    """
+
+    t = text or ""
+    t = _re_wrapped_citation.sub("", t)
+    t = _re_md_link.sub(r"\1", t)
+    t = _re_bare_url.sub("", t)
+    t = _re_md_header.sub("", t)
+    t = _re_md_hr.sub("", t)
+    t = _re_md_emphasis.sub("", t)
+    t = _re_ws.sub(" ", t).strip()
+    return t
+
 def strip_wake_phrase(
     text: str,
     wake_phrase: str,

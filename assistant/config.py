@@ -71,7 +71,10 @@ class CloudConfig:
         "лампа, свет, яркость, кельвин, сценарий, ночной режим, "
         "погода, температура, градус, зонт, осадки, ветер.",
     )
-    openai_llm_model: str = os.environ.get("OPENAI_LLM_MODEL", "gpt-5-mini")
+    # "-search-api" variants ground answers with live web search — important for
+    # a voice assistant fielding "what's the latest ..." style questions, since
+    # a plain chat model only knows its training cutoff.
+    openai_llm_model: str = os.environ.get("OPENAI_LLM_MODEL", "gpt-5-search-api")
     # Some models only support the default temperature. Set env to "default" to omit.
     openai_llm_temperature: float | None = _env_float_opt("OPENAI_LLM_TEMPERATURE", None)
     openai_tts_model: str = os.environ.get("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
