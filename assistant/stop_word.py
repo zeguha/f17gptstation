@@ -64,8 +64,15 @@ class StopWordConfig:
     # Comma-separated list, e.g. "стоп,хватит,отмена"
     words: list[str] = None  # filled in __post_init__
 
-    # Very strict thresholds to avoid TTS self-trigger.
-    match_threshold: float = 0.92
+    # Strict thresholds to avoid TTS self-trigger, balanced against Vosk's
+    # partial hypothesis sometimes revising a near-complete "стоп" into a
+    # different word once more audio arrives (confirmed on hardware: a
+    # partial matched "стоп" at ratio=0.857, one update later the language
+    # model reinterpreted it as the start of "сто градусов" — a much more
+    # likely continuation mid-weather-report — before it could cross a
+    # stricter threshold). 0.85 still requires a close match, just catches
+    # that race instead of losing it to the next partial update.
+    match_threshold: float = 0.85
     min_speech_ratio: float = 0.20
     # Recent-history window for the partial (fast) path: this is checked in
     # near-real-time as the word is being said, so it should reflect "was
