@@ -83,6 +83,22 @@ class VoskSession:
             return None
         return AsrResult(text=text, avg_confidence=_avg_word_conf(data))
 
+    def partial_text(self) -> str:
+        """Best current in-progress hypothesis, with no utterance boundary needed.
+
+        Unlike Result()/FinalResult(), this doesn't wait for Vosk to decide an
+        utterance ended (which needs a real gap of trailing silence — never
+        happens while something else keeps talking, e.g. our own TTS with no
+        AEC). Lets a caller react as soon as a target word appears, instead of
+        only after the whole ongoing utterance eventually finalizes.
+        """
+
+        try:
+            data = json.loads(self._rec.PartialResult())
+        except Exception:
+            return ""
+        return (data.get("partial") or "").strip().lower()
+
 
 class VoskEngine:
     def __init__(
