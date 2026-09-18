@@ -23,7 +23,7 @@ import time
 import wave
 
 from .asr_engines import VoskEngine
-from .audio_playback import PlaybackInfo, play_wav_bytes, stop_playback
+from .audio_playback import PlaybackInfo, start_playback, stop_playback, wait_playback
 from .audio_stream import AudioStream
 from .cloud_openai import OpenAILlm, OpenAIStt, OpenAITts
 from .config import AppConfig
@@ -88,7 +88,16 @@ def pcm16_to_wav_bytes(pcm16: bytes, *, sample_rate: int) -> bytes:
 
 class PlaybackController:
     def __init__(self):
-        self._lock = asyncio.Lock()
+        # Serializes play_blocking() calls so two playbacks never overlap.
+        # Deliberately NOT used by stop(): play_blocking() holds it for the
+        # whole duration of playback, so stop() waiting on the same lock
+        # would just block until playback already finished on its own —
+        # confirmed on real hardware: stop-word detection fired correctly
+        # mid-playback, but had nothing to interrupt (see also the
+        # start_playback/wait_playback split in audio_playback.py).
+        self._play_lock = asyncio.Lock()
+        # Brief-hold lock protecting _current/_playing reads/writes.
+        self._state_lock = asyncio.Lock()
         self._current: PlaybackInfo | None = None
         self._playing = False
 
@@ -97,20 +106,26 @@ class PlaybackController:
         return bool(self._playing)
 
     async def play_blocking(self, wav_bytes: bytes, *, device: int | None) -> None:
-        async with self._lock:
-            self._playing = True
+        async with self._play_lock:
+            # Starting is quick (just spawns the player); publish `_current`
+            # before the long wait, not after, so stop() has something to act on.
+            info = await asyncio.to_thread(start_playback, wav_bytes, device=device)
+            async with self._state_lock:
+                self._current = info
+                self._playing = True
             try:
-                # This blocks; run in worker thread.
-                self._current = await asyncio.to_thread(play_wav_bytes, wav_bytes, device=device)
+                await asyncio.to_thread(wait_playback, info)
             finally:
-                self._playing = False
-                self._current = None
+                async with self._state_lock:
+                    self._playing = False
+                    self._current = None
 
     async def stop(self) -> None:
-        async with self._lock:
-            if self._current is None:
-                return
-            await asyncio.to_thread(stop_playback, self._current)
+        async with self._state_lock:
+            info = self._current
+        if info is None:
+            return
+        await asyncio.to_thread(stop_playback, info)
 
 
 async def _audio_loop(
