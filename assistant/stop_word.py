@@ -37,7 +37,11 @@ class StopWordConfig:
     # Very strict thresholds to avoid TTS self-trigger.
     match_threshold: float = 0.92
     min_speech_ratio: float = 0.20
-    confirm_window_sec: float = 0.7
+    # Safety cap on how much VAD history we accumulate per in-progress
+    # utterance (see accept_frame()) — needs to comfortably cover a short
+    # word plus the trailing silence Vosk needs to finalize it, not just the
+    # word itself.
+    confirm_window_sec: float = 4.0
     cooldown_sec: float = 1.0
 
     vad_mode: int = 3
@@ -96,6 +100,14 @@ class StopWordDetector:
 
         is_sp = self._vad.is_speech(pcm16)
         self._window.append(bool(is_sp))
+        # Not a trailing window: Vosk only finalizes an utterance after a real
+        # gap of trailing silence (confirmed empirically to need well over a
+        # second), so by the time a result comes back, the *actual* speech is
+        # long behind "now" — a short trailing slice would sample pure
+        # post-speech silence and always read ratio=0. So we accumulate for
+        # the whole in-progress utterance and only reset once it's consumed
+        # below; `_window_max` here is just a generous safety cap against
+        # unbounded growth if finalization never comes.
         if len(self._window) > self._window_max:
             self._window = self._window[-self._window_max :]
 
@@ -111,6 +123,7 @@ class StopWordDetector:
 
         txt = out.text.strip().lower()
         ratio = self._speech_ratio(self._window)
+        self._window.clear()  # this utterance is fully consumed either way
         best = 0.0
         best_w = ""
         for w in self.cfg.words:
