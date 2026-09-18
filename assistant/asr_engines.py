@@ -130,6 +130,10 @@ class VoskEngine:
             rec = self._KaldiRecognizer(self._model, self.sample_rate, _json.dumps(self.grammar))
         else:
             rec = self._KaldiRecognizer(self._model, self.sample_rate)
+        # Without this, Result()/FinalResult() never include per-word confidences,
+        # so any consumer that reads `avg_confidence` (e.g. wake_min_conf) silently
+        # never has anything to filter on.
+        rec.SetWords(True)
         return VoskSession(rec)
 
 

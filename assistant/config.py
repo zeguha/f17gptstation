@@ -108,6 +108,11 @@ class WakeConfig:
     wake_phrase: str = os.environ.get("WAKE_PHRASE", "олег")
     wake_match_threshold: float = _env_float("WAKE_MATCH_THRESHOLD", 0.60)
     wake_min_speech_ratio: float = _env_float("WAKE_MIN_SPEECH_RATIO", 0.10)
+    # Minimum average per-word ASR confidence (0..1) to accept a wake match.
+    # Short/common wake phrases (e.g. a real name) are exactly what background
+    # TV/music/dialogue can hallucinate with a high text-match ratio but low
+    # confidence, so this is the main defense against that kind of false wake.
+    wake_min_conf: float = _env_float("WAKE_MIN_CONF", 0.70)
     wake_tail_drop_ms: int = _env_int("WAKE_TAIL_DROP_MS", 250)
     wake_cooldown_sec: float = _env_float("WAKE_COOLDOWN_SEC", 1.0)
 

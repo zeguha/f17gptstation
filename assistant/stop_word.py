@@ -53,7 +53,12 @@ class StopWordDetector:
     def __init__(self, *, cfg: StopWordConfig, engine: VoskEngine):
         """Create detector.
 
-        Important: `engine` MUST be constructed with `grammar=cfg.words`.
+        `engine` should decode free-form (no `grammar=`). Grammar-constrained
+        decoding (`UpdateGrammarFst`) needs a lexicon that small Vosk models
+        don't ship, which makes it silently never match any word regardless
+        of the grammar list — confirmed empirically, not a theoretical
+        concern. We fuzzy-match the free-form text against `cfg.words`
+        ourselves below, the same way wake-word detection does.
         """
 
         self.cfg = cfg
@@ -74,7 +79,7 @@ class StopWordDetector:
 
     @classmethod
     def from_model_path(cls, *, cfg: StopWordConfig, model_path: str) -> "StopWordDetector":
-        eng = VoskEngine(model_path=model_path, sample_rate=cfg.sample_rate, grammar=cfg.words)
+        eng = VoskEngine(model_path=model_path, sample_rate=cfg.sample_rate)
         return cls(cfg=cfg, engine=eng)
 
     def _speech_ratio(self, flags: list[bool]) -> float:

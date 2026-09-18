@@ -413,6 +413,7 @@ async def run() -> None:
         wake_phrase=cfg.wake.wake_phrase,
         wake_match_threshold=cfg.wake.wake_match_threshold,
         wake_min_speech_ratio=cfg.wake.wake_min_speech_ratio,
+        wake_min_conf=cfg.wake.wake_min_conf,
         wake_tail_drop_ms=cfg.wake.wake_tail_drop_ms,
         wake_cooldown_sec=cfg.wake.wake_cooldown_sec,
         command_start_timeout_sec=cfg.turn.command_start_timeout_sec,
@@ -450,7 +451,12 @@ async def run() -> None:
         cooldown_sec=cfg.turn.stop_word_cooldown_sec,
     )
     # Important: share the loaded Vosk model to avoid loading it twice (RAM on RPi 3B).
-    stop_engine = wake_engine.clone_with(grammar=stop_words, sample_rate=cfg.audio.sample_rate)
+    # Free-form decoding, not grammar-constrained: `UpdateGrammarFst` requires a
+    # lexicon the small Vosk model doesn't ship, so a grammar-locked recognizer
+    # silently never matches *any* word (confirmed empirically), which is why
+    # stop-words previously never fired. StopWordDetector already fuzzy-matches
+    # the free-form text against `cfg.words`, so this needs no other changes.
+    stop_engine = wake_engine.clone_with(sample_rate=cfg.audio.sample_rate)
     stop_detector = StopWordDetector(cfg=sw_cfg, engine=stop_engine)
 
     log.info("Cloud orchestrated assistant ready (build=%s). Wake='%s'", BUILD_ID, cfg.wake.wake_phrase)

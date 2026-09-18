@@ -234,8 +234,14 @@ class WakeCommandPipeline:
                 # If ASR matched the wake phrase extremely well but VAD says "no speech",
                 # prefer ASR to avoid a "wake does nothing" UX. This happens on some
                 # macOS setups where WebRTC VAD is overly strict.
+                # But VAD is the only signal that ties the match to something actually
+                # said near the mic; without it (or without decent confidence backing
+                # the match) a strong text ratio alone is exactly what a short, common
+                # wake word (e.g. a real name) picks up from background TV/music/dialogue.
+                # So only take this shortcut when confidence also backs the match.
                 wake_words = self.cfg.wake_phrase.lower().strip().split()
-                if w_ratio >= 0.95 and len(wake_words) <= 2:
+                conf_ok = conf is None or conf >= self.cfg.wake_min_conf
+                if w_ratio >= 0.95 and len(wake_words) <= 2 and conf_ok:
                     log.warning(
                         "wake accepted despite low speech_ratio=%.3f (w_ratio=%.3f, text='%s')",
                         ratio,
