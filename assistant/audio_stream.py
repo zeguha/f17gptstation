@@ -28,6 +28,17 @@ class AudioChunk:
     t_monotonic: float
 
 
+def _apply_gain_int16(pcm16: bytes, gain: float) -> bytes:
+    """Scale PCM16 mono samples by `gain`, clipped to avoid wraparound distortion."""
+
+    if not pcm16:
+        return pcm16
+    x = np.frombuffer(pcm16, dtype=np.int16).astype(np.float32)
+    x *= gain
+    np.clip(x, -32768, 32767, out=x)
+    return x.astype(np.int16).tobytes()
+
+
 class AudioStream:
     """Non-blocking microphone stream that outputs fixed-size PCM16 mono frames.
 
@@ -46,11 +57,19 @@ class AudioStream:
         device: Optional[int] = None,
         queue_max_chunks: int = 200,
         ignore_event=None,
+        input_gain: float = 1.0,
     ):
         self.sample_rate = int(sample_rate)
         self.frame_samples = int(frame_samples)
         self.device = device
         self.ignore_event = ignore_event
+        # Digital pre-amp applied to every captured frame before it reaches
+        # VAD/ASR. Useful when the mic has no hardware capture-level control
+        # (confirmed: some USB devices expose only an on/off capture switch,
+        # no volume) and turning the speaker down isn't wanted — e.g. so a
+        # quiet "стоп" barge-in registers without shouting, without making
+        # the assistant's own TTS answers harder to hear.
+        self.input_gain = float(input_gain)
 
         # Output frame subscribers.
         # We broadcast the same normalized frames to multiple independent readers
@@ -253,6 +272,8 @@ class AudioStream:
         while len(buf) >= self.frame_bytes:
             frame = bytes(buf[: self.frame_bytes])
             del buf[: self.frame_bytes]
+            if self.input_gain != 1.0:
+                frame = _apply_gain_int16(frame, self.input_gain)
             chunk = AudioChunk(pcm16=frame, t_monotonic=t_stamp)
 
             # Broadcast with bounded latency: drop oldest on overflow.

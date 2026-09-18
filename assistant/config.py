@@ -97,6 +97,12 @@ class AudioConfig:
     sample_rate: int = _env_int("SAMPLE_RATE", 16000)
     frame_ms: int = _env_int("FRAME_MS", 30)
 
+    # Digital pre-amp applied to captured mic audio (1.0 = no change). Useful
+    # when the mic has no hardware capture-level control (some USB devices
+    # only expose an on/off capture switch, no gain) and you don't want to
+    # turn the speaker down to make barge-in easier to trigger.
+    input_gain: float = _env_float("INPUT_GAIN", 1.0)
+
     # Playback
     playback_sample_rate: int = _env_int("PLAYBACK_SR", 24000)
     # If True, mic input is ignored while TTS is playing (prevents TTS->wake feedback).

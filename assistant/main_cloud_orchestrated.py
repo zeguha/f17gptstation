@@ -489,6 +489,7 @@ async def run() -> None:
         device=device_in,
         ignore_event=ignore_event,
         queue_max_chunks=500,
+        input_gain=cfg.audio.input_gain,
     ) as audio:
         pipeline = WakeCommandPipeline(
             cfg=pipe_cfg,
