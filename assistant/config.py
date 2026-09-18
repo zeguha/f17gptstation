@@ -144,6 +144,14 @@ class TurnConfig:
     stop_words: str = os.environ.get("STOP_WORDS", "стоп,хватит,отмена")
     stop_word_cooldown_sec: float = _env_float("STOP_WORD_COOLDOWN_SEC", 1.0)
 
+    # Short spoken acknowledgment played as soon as a command is understood,
+    # while the real answer (LLM web search, weather, etc.) is still being
+    # worked on — otherwise a several-second silence makes it unclear
+    # whether anything was heard at all. Synthesized once at startup and
+    # replayed from memory, so it adds ~no latency of its own.
+    ack_enabled: bool = _env_bool("ACK_ENABLED", True)
+    ack_phrase: str = os.environ.get("ACK_PHRASE", "Секунду.")
+
 
 @dataclass(slots=True)
 class WeatherConfig:

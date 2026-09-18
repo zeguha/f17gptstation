@@ -35,6 +35,7 @@ from .pipeline_vosk import PipelineCancelled, PipelineConfig, WakeCommandPipelin
 from .postprocess import clean_for_speech
 from .speech import SPEAKING_EVENT, get_default_input_device
 from .stop_word import StopWordConfig, StopWordDetector
+from .tts_cache import TtsCache
 from .utils import normalize_text
 from .weather_skill import WeatherSkillError, handle_weather_intent
 from .lights_adapter_factory import build_gauss_adapter
@@ -128,6 +129,16 @@ class PlaybackController:
         await asyncio.to_thread(stop_playback, info)
 
 
+async def _play_ack(*, playback: PlaybackController, cfg: AppConfig, ack_wav: bytes) -> None:
+    SPEAKING_EVENT.set()
+    try:
+        await playback.play_blocking(ack_wav, device=cfg.audio.output_device)
+    except Exception:
+        log.exception("ack playback failed")
+    finally:
+        SPEAKING_EVENT.clear()
+
+
 async def _audio_loop(
     *,
     pipeline: WakeCommandPipeline,
@@ -158,6 +169,9 @@ async def _worker_stt(
     out_q: asyncio.Queue,
     stt: OpenAIStt,
     stop_event: asyncio.Event,
+    playback: PlaybackController | None = None,
+    cfg: AppConfig | None = None,
+    ack_wav: bytes = b"",
 ) -> None:
     while not stop_event.is_set():
         interaction = await in_q.get()
@@ -176,6 +190,13 @@ async def _worker_stt(
                 log.info("STT latency=%.2fs", time.monotonic() - t0)
                 user_text = (stt_res.text or "").strip()
                 log.info("STT text: '%s'", user_text)
+            if user_text and ack_wav and playback is not None and cfg is not None:
+                # Fire-and-forget: lets the user know the command was heard
+                # while the (possibly slow — LLM web search, weather retries)
+                # real answer is still being worked on. PlaybackController's
+                # play lock naturally sequences the real answer right after
+                # this, whenever _player() gets to it.
+                asyncio.create_task(_play_ack(playback=playback, cfg=cfg, ack_wav=ack_wav), name="ack")
             await _put_latest(out_q, (interaction, user_text))
         except Exception:
             log.exception("STT worker failed")
@@ -443,6 +464,31 @@ async def run() -> None:
     tts = OpenAITts(cfg.cloud)
     dialog = DialogState(system_prompt=cfg.turn.system_prompt, max_turns=cfg.turn.max_context_turns)
 
+    # Pre-synthesize the "heard you, one sec" ack once so playing it later
+    # adds ~no latency of its own (see ACK_ENABLED). Cached to disk too, so
+    # most restarts don't even need an API call for it.
+    ack_wav = b""
+    if cfg.turn.ack_enabled and cfg.turn.ack_phrase.strip():
+        tts_cache = TtsCache.default()
+        cache_kwargs = dict(
+            provider="openai",
+            model=cfg.cloud.openai_tts_model,
+            voice=cfg.cloud.openai_tts_voice,
+            text=cfg.turn.ack_phrase,
+        )
+        ack_wav = tts_cache.get(**cache_kwargs) or b""
+        if ack_wav:
+            log.info("ack phrase loaded from cache (%d bytes)", len(ack_wav))
+        else:
+            try:
+                ack_res = await tts.synthesize(cfg.turn.ack_phrase)
+                ack_wav = ack_res.wav_bytes
+                tts_cache.put(**cache_kwargs, wav_bytes=ack_wav)
+                log.info("ack phrase synthesized and cached (%d bytes)", len(ack_wav))
+            except Exception:
+                log.exception("failed to pre-synthesize ack phrase; ack disabled for this run")
+                ack_wav = b""
+
     # If suppress_mic_during_tts=True, stop-word cannot work.
     # So we override ignore_event based on ENABLE_STOP_WORD.
     ignore_event = None
@@ -514,7 +560,18 @@ async def run() -> None:
 
         for t in [
             asyncio.create_task(_audio_loop(pipeline=pipeline, out_q=q0, stop_event=stop_event), name="audio_loop"),
-            asyncio.create_task(_worker_stt(in_q=q0, out_q=q1, stt=stt, stop_event=stop_event), name="stt"),
+            asyncio.create_task(
+                _worker_stt(
+                    in_q=q0,
+                    out_q=q1,
+                    stt=stt,
+                    stop_event=stop_event,
+                    playback=playback,
+                    cfg=cfg,
+                    ack_wav=ack_wav,
+                ),
+                name="stt",
+            ),
             asyncio.create_task(_worker_llm(in_q=q1, out_q=q2, llm=llm, dialog=dialog, stop_event=stop_event), name="llm"),
             asyncio.create_task(_worker_tts(in_q=q2, out_q=q3, tts=tts, stop_event=stop_event), name="tts"),
             asyncio.create_task(_player(in_q=q3, playback=playback, cfg=cfg, stop_event=stop_event), name="player"),
