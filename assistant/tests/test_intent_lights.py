@@ -62,6 +62,43 @@ class TestLightsIntent(unittest.TestCase):
         assert i is not None
         self.assertEqual(i.action, "state_query")
 
+    def _check(self, phrase, action, **fields):
+        i = detect_lights_intent(phrase)
+        self.assertIsNotNone(i, phrase)
+        self.assertEqual(i.action, action, phrase)
+        for k, v in fields.items():
+            self.assertEqual(getattr(i, k), v, f"{phrase}: {k}")
+
+    def test_relative_brightness_phrasings(self):
+        # Real phrasings that previously fell through to the LLM, which then
+        # cheerfully answered "сделал" without touching the lamp.
+        for p in ["увеличь яркость", "прибавь яркость", "повысь яркость", "сделай поярче",
+                  "сделай посветлее", "сделай светлее", "яркость больше", "добавь яркости",
+                  "подними яркость"]:
+            self._check(p, "brightness_delta", brightness_delta=20)
+        for p in ["уменьши яркость", "убавь яркость", "понизь яркость", "снизь яркость",
+                  "сделай потемнее", "сделай тусклее", "сделай свет тусклее", "яркость меньше",
+                  "приглуши свет"]:
+            self._check(p, "brightness_delta", brightness_delta=-20)
+
+    def test_relative_brightness_with_amount(self):
+        self._check("убавь яркость на 30", "brightness_delta", brightness_delta=-30)
+        self._check("прибавь яркость на 15%", "brightness_delta", brightness_delta=15)
+        # ...but an absolute target stays absolute.
+        self._check("приглуши до 30", "brightness_set", brightness_percent=30)
+        self._check("яркость на 50", "brightness_set", brightness_percent=50)
+
+    def test_brightness_max_min(self):
+        self._check("яркость на максимум", "brightness_set", brightness_percent=100)
+        self._check("максимальная яркость", "brightness_set", brightness_percent=100)
+        self._check("включи свет на полную", "brightness_set", brightness_percent=100)
+        self._check("яркость на минимум", "brightness_set", brightness_percent=10)
+
+    def test_music_volume_is_not_lights(self):
+        for p in ["убавь громкость", "прибавь громкость", "сделай громче", "сделай тише",
+                  "громкость на 50", "перемотай вперед на 30 секунд"]:
+            self.assertIsNone(detect_lights_intent(p), p)
+
 
 if __name__ == "__main__":
     unittest.main()

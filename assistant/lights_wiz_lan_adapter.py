@@ -34,6 +34,29 @@ def _clamp(v: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(v)))
 
 
+def _ip_cache_path() -> str:
+    return os.environ.get("WIZ_IP_CACHE") or os.path.join(".state", "wiz_ip_cache.json")
+
+
+def _load_ip_cache() -> dict[str, str]:
+    try:
+        with open(_ip_cache_path(), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return {str(k): str(v) for k, v in d.items()} if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_ip_cache(cache: dict[str, str]) -> None:
+    try:
+        p = _ip_cache_path()
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+    except Exception:
+        pass
+
+
 def _udp_broadcast_discover(
     *, broadcast_addrs: list[str], timeout_sec: float = 1.5, bind_ip: str | None = None
 ) -> list[dict]:
@@ -264,7 +287,7 @@ class WizLanAdapter:
             mac = str(res.get("mac") or "").strip() or None
             module = str(res.get("moduleName") or res.get("fwVersion") or "").strip() or None
             lamp_id = mac or f"wiz:{ip}"
-            self._id_to_ip[lamp_id] = ip
+            self._remember(lamp_id, ip)
 
             # Capabilities are best-effort; real check is by trial (or extended API).
             caps = LampCapabilities(supports_brightness=True, supports_ct=True, supports_rgb=True, supports_scenes=False)
@@ -315,7 +338,7 @@ class WizLanAdapter:
             mac = str(res.get("mac") or "").strip() or None
             module = str(res.get("moduleName") or res.get("fwVersion") or "").strip() or None
             lamp_id = mac or f"wiz:{ip}"
-            self._id_to_ip[lamp_id] = ip
+            self._remember(lamp_id, ip)
             caps = LampCapabilities(supports_brightness=True, supports_ct=True, supports_rgb=True, supports_scenes=False)
             lamps.append(
                 Lamp(
@@ -330,6 +353,57 @@ class WizLanAdapter:
             )
         return lamps
 
+
+    def _remember(self, lamp_id: str, ip: str) -> None:
+        self._id_to_ip[lamp_id] = ip
+        cache = _load_ip_cache()
+        if cache.get(lamp_id) != ip:
+            cache[lamp_id] = ip
+            _save_ip_cache(cache)
+
+    async def _probe_mac(self, ip: str) -> str | None:
+        """MAC of the WiZ device at `ip` (None if nothing WiZ answers there)."""
+        try:
+            obj = await asyncio.to_thread(
+                _udp_request,
+                ip,
+                {"method": "getSystemConfig", "params": {}},
+                timeout_sec=0.7,
+                retries=2,
+            )
+        except Exception:
+            return None
+        mac = str((obj.get("result") or {}).get("mac") or "").strip().lower()
+        return mac or None
+
+    async def _sweep(self) -> list[dict]:
+        """Unicast probe every host of the local /24(s) in one bounded window.
+
+        Broadcast discovery is unreliable on some routers, and a lamp's DHCP
+        address can change under a hard-coded WIZ_IPS. A unicast sweep from
+        one socket finds it regardless (all sends are instant; replies are
+        collected for ~1.5s). Each host is probed twice because WiZ bulbs
+        often drop the first packet after being idle.
+        """
+
+        local_ips = _local_private_ips_best_effort()
+        prefixes: list[str] = []
+        for ip in local_ips:
+            pre = ip.rsplit(".", 1)[0]
+            if pre not in prefixes:
+                prefixes.append(pre)
+        if not prefixes:
+            return []
+        hosts = [f"{pre}.{i}" for pre in prefixes for i in range(1, 255)]
+        try:
+            return await asyncio.to_thread(
+                _udp_broadcast_discover,
+                broadcast_addrs=hosts + hosts,
+                timeout_sec=1.5,
+                bind_ip=local_ips[0],
+            )
+        except OSError:
+            return []
 
     def _ip_for(self, lamp_id: str) -> str:
         ip = self._id_to_ip.get(lamp_id)
@@ -360,26 +434,33 @@ class WizLanAdapter:
             if str(e) != "unknown_lamp_id":
                 raise
 
-        # 3) Probe manual IPs and match by mac.
-        if self.manual_ips:
-            for ip in list(self.manual_ips or []):
-                try:
-                    obj = await asyncio.to_thread(
-                        _udp_request,
-                        ip,
-                        {"method": "getSystemConfig", "params": {}},
-                        timeout_sec=self.timeout_sec,
-                        retries=max(1, self.retries),
-                    )
-                except Exception:
-                    continue
-                res = obj.get("result") or {}
-                mac = str(res.get("mac") or "").strip().lower()
-                if mac and mac == lamp_id.strip().lower():
-                    self._id_to_ip[lamp_id] = ip
-                    return ip
+        want = lamp_id.strip().lower()
 
-        # 4) Last resort: run discovery (tries several broadcasts) and retry.
+        # 3) Last known IP for this MAC, then manual IPs — verified by MAC,
+        # since DHCP may have handed the address to another device.
+        tried: set[str] = set()
+        cached = _load_ip_cache().get(lamp_id)
+        for ip in ([cached] if cached else []) + list(self.manual_ips or []):
+            if ip in tried:
+                continue
+            tried.add(ip)
+            if await self._probe_mac(ip) == want:
+                self._remember(lamp_id, ip)
+                return ip
+
+        # 4) Unicast sweep of the local subnet: finds the lamp even after its
+        # address changed and without depending on broadcast delivery.
+        for r in await self._sweep():
+            ip = r.get("_ip")
+            mac = str((r.get("result") or {}).get("mac") or "").strip().lower()
+            if ip and mac:
+                self._remember(mac, ip)
+        if lamp_id in self._id_to_ip:
+            return self._id_to_ip[lamp_id]
+        if want in self._id_to_ip:
+            return self._id_to_ip[want]
+
+        # 5) Last resort: run discovery (tries several broadcasts) and retry.
         try:
             _ = await self.discover()
             return self._ip_for(lamp_id)

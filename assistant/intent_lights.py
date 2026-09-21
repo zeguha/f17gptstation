@@ -62,6 +62,8 @@ class LightsIntent:
 # --- keyword primitives ---
 _RE_LIGHT_WORD = re.compile(r"\b(свет|ламп(а|ы)?|люстр(а|ы)?|бра|ночник)\b")
 
+_RE_MUSIC_TALK = re.compile(r"\b(громкост\w*|звук\w*|громче|тише|секунд\w*|минут\w*|трек\w*|перемотай\w*|промотай\w*)\b")
+
 _RE_ON = re.compile(r"\b(включи|вруби|зажги|сделай\s+свет|свет\s+вкл|вкл)\b")
 _RE_OFF = re.compile(r"\b(выключи|выруби|погаси|свет\s+выкл|выкл)\b")
 
@@ -97,9 +99,35 @@ _ROOM_STOPWORDS: tuple[str, ...] = (
 _RE_BRIGHTNESS_SET = re.compile(r"\b(?:яркост[ьи]|сделай\s+яркост[ьи]|приглуши\s+до|на)\s*(\d{1,3})\s*%?\b")
 _RE_BRIGHTNESS_PLAIN = re.compile(r"\b(\d{1,3})\s*%\b")
 
-_RE_DIM = re.compile(r"\b(приглуши|потуши\s+чуть|убавь\s+свет|темнее)\b")
-_RE_BRIGHTER = re.compile(r"\b(ярче|прибавь\s+свет|сделай\s+свет\s+ярче|сильнее)\b")
-_RE_DELTA = re.compile(r"\b(?:на|на\s+)?([+-]?\d{1,3})\s*%\b")
+# Relative brightness. Verbs only count next to "яркость"/"свет" so that e.g.
+# "убавь громкость" (music) never lands here.
+_DIM_VERBS = r"(?:убавь|уменьши|понизь|снизь|сбавь|притуши|приглуши)"
+_BRIGHT_VERBS = r"(?:прибавь|увеличь|повысь|добавь|подними|усиль)"
+_RE_DIM = re.compile(
+    r"\b(?:" + _DIM_VERBS + r"\s+(?:немного\s+|чуть\s+)?(?:яркост\w*|свет\w*)"
+    r"|приглуши|притуши|потуши\s+чуть|темнее|потемнее|тусклее|потусклее"
+    r"|яркост\w*\s+(?:меньше|ниже|поменьше))\b"
+)
+_RE_BRIGHTER = re.compile(
+    r"\b(?:" + _BRIGHT_VERBS + r"\s+(?:немного\s+|чуть\s+)?(?:яркост\w*|свет\w*)"
+    r"|ярче|поярче|светлее|посветлее|сильнее"
+    r"|яркост\w*\s+(?:больше|выше|побольше))\b"
+)
+_RE_BRIGHT_MAX = re.compile(
+    r"\b(?:максимальн\w*\s+яркост\w*"
+    r"|яркост\w*\s+(?:на\s+)?(?:максимум|максимальн\w*|полную)"
+    r"|на\s+полную|на\s+максимум)\b"
+)
+_RE_BRIGHT_MIN = re.compile(
+    r"\b(?:минимальн\w*\s+яркост\w*|яркост\w*\s+(?:на\s+)?(?:минимум|минимальн\w*)|на\s+минимум)\b"
+)
+_RE_DELTA_NA = re.compile(r"\bна\s+([+-]?\d{1,3})\b")
+_RE_DELTA_PCT = re.compile(r"([+-]?\d{1,3})\s*%")
+
+
+def _extract_delta(t: str) -> int | None:
+    m = _RE_DELTA_NA.search(t) or _RE_DELTA_PCT.search(t)
+    return abs(int(m.group(1))) if m else None
 
 _RE_CT_K = re.compile(r"\b(\d{4,5})\s*k\b")
 _RE_WARMER = re.compile(r"\b(теплее|потеплее|желтее)\b")
@@ -163,6 +191,12 @@ def detect_lights_intent(normalized_text: str) -> LightsIntent | None:
     if not t:
         return None
 
+    # Music/volume/seek talk with a bare number ("громкость на 50", "перемотай на
+    # 30 секунд") must not be mistaken for brightness — lights are routed before
+    # Spotify, and a bare "на N" is otherwise enough to look like a brightness set.
+    if _RE_MUSIC_TALK.search(t) and not (_RE_LIGHT_WORD.search(t) or re.search(r"\bяркост\w*", t)):
+        return None
+
     target_scope, target_name = _extract_target(t)
     has_light_word = bool(_RE_LIGHT_WORD.search(t))
     has_all = bool(_RE_ALL.search(t))
@@ -183,7 +217,8 @@ def detect_lights_intent(normalized_text: str) -> LightsIntent | None:
         looks_like_lights = True
     if _RE_QUERY.search(t) and (has_light_word or has_all or has_roomish_target):
         looks_like_lights = True
-    if _RE_BRIGHTNESS_SET.search(t) or _RE_DIM.search(t) or _RE_BRIGHTER.search(t):
+    if (_RE_BRIGHTNESS_SET.search(t) or _RE_DIM.search(t) or _RE_BRIGHTER.search(t)
+            or _RE_BRIGHT_MAX.search(t) or _RE_BRIGHT_MIN.search(t)):
         looks_like_lights = True
     if _RE_CT_K.search(t) or _RE_WARMER.search(t) or _RE_COOLER.search(t) or _RE_NEUTRAL.search(t):
         looks_like_lights = True
@@ -248,34 +283,34 @@ def detect_lights_intent(normalized_text: str) -> LightsIntent | None:
     if _RE_NEUTRAL.search(t) and ("свет" in t or "температур" in t):
         return LightsIntent(action="ct_set", target_scope=target_scope, target_name=target_name, ct_mode="neutral", ct_kelvin=4000, confidence=0.65)
 
+    # Brightness max/min ("на максимум", "минимальная яркость", "на полную").
+    if _RE_BRIGHT_MAX.search(t):
+        return LightsIntent(action="brightness_set", target_scope=target_scope, target_name=target_name, brightness_percent=100, confidence=0.75)
+    if _RE_BRIGHT_MIN.search(t):
+        return LightsIntent(action="brightness_set", target_scope=target_scope, target_name=target_name, brightness_percent=10, confidence=0.75)
+
+    # "убавь яркость на 20" is relative, "приглуши до 30" / "яркость на 50" absolute.
+    # Relative wording wins for "на N" unless the user said "до N".
+    is_relative = bool(_RE_DIM.search(t) or _RE_BRIGHTER.search(t))
+    says_absolute_target = bool(re.search(r"\bдо\s+\d", t))
+
     # Brightness set
     m = _RE_BRIGHTNESS_SET.search(t)
-    if m:
+    if m and (says_absolute_target or not is_relative):
         p = _clamp_pct(int(m.group(1)))
         return LightsIntent(action="brightness_set", target_scope=target_scope, target_name=target_name, brightness_percent=p, confidence=0.8)
     m = _RE_BRIGHTNESS_PLAIN.search(t)
-    if m and ("ярк" in t or "приглуш" in t or "на" in t):
+    if m and (says_absolute_target or not is_relative) and ("ярк" in t or "приглуш" in t or "на" in t):
         p = _clamp_pct(int(m.group(1)))
         return LightsIntent(action="brightness_set", target_scope=target_scope, target_name=target_name, brightness_percent=p, confidence=0.65)
 
     # Brightness relative
     if _RE_DIM.search(t):
-        # If explicit delta exists: "на -20%".
-        dm = _RE_DELTA.search(t)
-        if dm:
-            d = int(dm.group(1))
-            if d > 0:
-                d = -d
-            return LightsIntent(action="brightness_delta", target_scope=target_scope, target_name=target_name, brightness_delta=int(d), confidence=0.65)
-        return LightsIntent(action="brightness_delta", target_scope=target_scope, target_name=target_name, brightness_delta=-20, confidence=0.6)
+        d = _extract_delta(t)
+        return LightsIntent(action="brightness_delta", target_scope=target_scope, target_name=target_name, brightness_delta=-_clamp_pct(d if d else 20), confidence=0.65 if d else 0.6)
     if _RE_BRIGHTER.search(t):
-        dm = _RE_DELTA.search(t)
-        if dm:
-            d = int(dm.group(1))
-            if d < 0:
-                d = -d
-            return LightsIntent(action="brightness_delta", target_scope=target_scope, target_name=target_name, brightness_delta=int(d), confidence=0.65)
-        return LightsIntent(action="brightness_delta", target_scope=target_scope, target_name=target_name, brightness_delta=+20, confidence=0.6)
+        d = _extract_delta(t)
+        return LightsIntent(action="brightness_delta", target_scope=target_scope, target_name=target_name, brightness_delta=_clamp_pct(d if d else 20), confidence=0.65 if d else 0.6)
 
     # Power
     if _RE_ON.search(t):
