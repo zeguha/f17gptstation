@@ -126,6 +126,56 @@ def _udp_broadcast_discover(
             pass
 
 
+def _udp_sweep(hosts: list[str], bind_ip: str) -> list[dict]:
+    """Probe each host once; collect replies concurrently with sending.
+
+    Sends to unresolved neighbours are throttled by ARP (~20ms each), so the
+    send phase takes a few seconds per /24; a receiver thread keeps reading
+    the whole time so early replies aren't lost.
+    """
+
+    import threading
+
+    msg = json.dumps({"method": "getSystemConfig", "params": {}}).encode("utf-8")
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    out: list[dict] = []
+    done = threading.Event()
+
+    def rx() -> None:
+        while not done.is_set():
+            try:
+                data, addr = s.recvfrom(65535)
+                obj = json.loads(data.decode("utf-8", errors="ignore"))
+                if isinstance(obj, dict):
+                    obj["_ip"] = addr[0]
+                    out.append(obj)
+            except socket.timeout:
+                continue
+            except Exception:
+                if done.is_set():
+                    return
+
+    try:
+        s.settimeout(0.2)
+        s.bind((bind_ip, 0))
+        t = threading.Thread(target=rx, daemon=True)
+        t.start()
+        for h in hosts:
+            try:
+                s.sendto(msg, (h, WIZ_PORT))
+            except OSError:
+                pass
+        time.sleep(1.0)
+        done.set()
+        t.join(timeout=1.0)
+        return list(out)
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
 def _local_private_ips_best_effort() -> list[str]:
     """Best-effort list of local IPs.
 
@@ -386,7 +436,9 @@ class WizLanAdapter:
         often drop the first packet after being idle.
         """
 
-        local_ips = _local_private_ips_best_effort()
+        local_ips = [
+            ip for ip in _local_private_ips_best_effort() if not ip.startswith("127.")
+        ]
         prefixes: list[str] = []
         for ip in local_ips:
             pre = ip.rsplit(".", 1)[0]
@@ -396,12 +448,7 @@ class WizLanAdapter:
             return []
         hosts = [f"{pre}.{i}" for pre in prefixes for i in range(1, 255)]
         try:
-            return await asyncio.to_thread(
-                _udp_broadcast_discover,
-                broadcast_addrs=hosts + hosts,
-                timeout_sec=1.5,
-                bind_ip=local_ips[0],
-            )
+            return await asyncio.to_thread(_udp_sweep, hosts, local_ips[0])
         except OSError:
             return []
 

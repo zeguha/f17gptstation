@@ -224,7 +224,7 @@ class LightsConfig:
         os.path.join(os.path.dirname(__file__), "..", ".state", "lights.json"),
     )
 
-    request_timeout_sec: float = _env_float("LIGHTS_REQUEST_TIMEOUT_SEC", 4.0)
+    request_timeout_sec: float = _env_float("LIGHTS_REQUEST_TIMEOUT_SEC", 10.0)
     state_cache_ttl_sec: float = _env_float("LIGHTS_STATE_CACHE_TTL_SEC", 6.0)
 
     # Target defaults (to make short commands usable):
